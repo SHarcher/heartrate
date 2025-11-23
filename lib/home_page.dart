@@ -1,10 +1,16 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import 'package:camera/camera.dart';
+
 import 'pages/camera_fullscreen_page.dart';
+import 'widgets/floating_camera_preview.dart';
 import 'widgets/heart_rate_card.dart';
+
 import '../services/camera_service.dart';
 import '../core/heart_rate_engine.dart';
-import 'widgets/floating_camera_preview.dart';
-import 'package:camera/camera.dart';
+import '../core/heart_rate_adapter.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -21,8 +27,10 @@ class _HomePageState extends State<HomePage> {
   late CameraService _cameraService;
 
   bool showFloatingCamera = false;
-
   bool _processingFrame = false;
+
+  // Position of the draggable floating preview.
+  Offset floatingPos = const Offset(20, 500);
 
   @override
   void initState() {
@@ -40,64 +48,39 @@ class _HomePageState extends State<HomePage> {
     _cameraService = CameraService();
   }
 
-  /// Process a camera frame for heart rate extraction
-  void _onFrame(CameraImage img) {
+  // ---------------------------------------------------------------------------
+  // MOBILE FRAME HANDLER
+  // ---------------------------------------------------------------------------
+  void _onFrameMobile(CameraImage img) {
     if (_processingFrame) return;
     _processingFrame = true;
 
     try {
-      if (img.format.group != ImageFormatGroup.bgra8888 || img.planes.isEmpty) {
-        _processingFrame = false;
-        return;
-      }
-
-      final p = img.planes[0];
-      final bytes = p.bytes;
-
-      final width = img.width;
-      final height = img.height;
-
-      final roi = (width * 0.4).round();
-      final x0 = (width - roi) ~/ 2;
-      final y0 = (height - roi) ~/ 2;
-
-      double sumR = 0, sumG = 0, sumB = 0;
-      int count = 0;
-
-      final bytesPerPixel = 4;
-      final rowStride = p.bytesPerRow;
-
-      for (int y = y0; y < y0 + roi; y += 4) {
-        final row = y * rowStride;
-        for (int x = x0; x < x0 + roi; x += 4) {
-          final idx = row + x * bytesPerPixel;
-          if (idx + 2 >= bytes.length) continue;
-
-          sumB += bytes[idx];
-          sumG += bytes[idx + 1];
-          sumR += bytes[idx + 2];
-          count++;
-        }
-      }
-
-      if (count > 0) {
-        _engine.addSample(
-          sumR / count,
-          sumG / count,
-          sumB / count,
-          DateTime.now(),
-        );
-      }
+      HeartRateAdapter.processMobileFrame(img, _engine);
     } finally {
+      // Simple throttle to avoid overloading computation.
       Future.delayed(const Duration(milliseconds: 25), () {
         _processingFrame = false;
       });
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // WEB FRAME HANDLER
+  // ---------------------------------------------------------------------------
+  void _onFrameWeb(Uint8ClampedList rgba, int w, int h) {
+    HeartRateAdapter.processWebFrame(rgba, w, h, _engine);
+  }
+
+  // ---------------------------------------------------------------------------
+  // START MEASUREMENT
+  // ---------------------------------------------------------------------------
   Future<void> startMeasurement() async {
     if (!_cameraService.isInitialized) {
-      await _cameraService.initialize(_onFrame);
+      await _cameraService.initialize(
+        onFrameMobile: _onFrameMobile,
+        onFrameWeb: _onFrameWeb,
+      );
     }
   }
 
@@ -115,6 +98,7 @@ class _HomePageState extends State<HomePage> {
       appBar: AppBar(title: const Text("Heart Rate Home")),
       body: Stack(
         children: [
+          // Main content (heart rate display + buttons)
           Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
@@ -130,28 +114,38 @@ class _HomePageState extends State<HomePage> {
                 icon: const Icon(Icons.camera_alt),
                 label: const Text("Camera"),
                 onPressed: () async {
-                  await startMeasurement(); // ensure camera running
+                  await startMeasurement();
                   setState(() => showFloatingCamera = true);
                 },
               ),
             ],
           ),
-          if (showFloatingCamera && controller != null)
+
+          // Draggable floating camera preview
+          if (showFloatingCamera)
             Positioned(
-              right: 20,
-              bottom: 20,
-              child: FloatingCameraPreview(
-                controller: controller,
-                onTap: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => CameraFullscreenPage(
-                        controller: controller,
-                      ),
-                    ),
-                  );
+              left: floatingPos.dx,
+              top: floatingPos.dy,
+              child: GestureDetector(
+                onPanUpdate: (details) {
+                  setState(() {
+                    floatingPos += details.delta;
+                  });
                 },
+                child: FloatingCameraPreview(
+                  controller: controller,
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => CameraFullscreenPage(
+                          controller: controller,
+                          onMinimize: () => Navigator.pop(context),
+                        ),
+                      ),
+                    );
+                  },
+                ),
               ),
             ),
         ],
